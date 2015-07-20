@@ -20,5 +20,122 @@ android {
 }
 
 dependencies {
-    compile fileTree(dir: 'libs', include: ['*.jar'])
+    testCompile 'org.robolectric:robolectric:3.0'
+}
+
+def mavenSettingsFile = System.getProperty('user.home') + '/.m2/settings.xml'
+
+task checkSonatypeMirrorSetting(type: ReadXmlTask) {
+    group 'Robolectric'
+    xmlFileName mavenSettingsFile
+    validIf { settings ->
+        settings.mirrors.mirror.find { mirror -> mirror.mirrorOf == 'sonatype' }
+    }
+}
+
+task updateSonatypeMirrorSetting(type: UpdateXmlTask, dependsOn: checkSonatypeMirrorSetting) {
+    group 'Robolectric'
+    xmlFile file(mavenSettingsFile)
+    xmlRoot 'settings'
+    update { settings ->
+        def mirror
+        if (settings.mirrors) {
+            mirror = settings.mirrors[0]?.appendNode('mirror', [:])
+        } else {
+            mirror = settings.appendNode('mirrors', [:]).appendNode('mirror', [:])
+        }
+        mirror.appendNode('id', 'artifactory')
+        mirror.appendNode('name', 'Local Arifactory')
+        mirror.appendNode('url', 'http://artifactory/repo')
+        mirror.appendNode('mirrorOf', 'sonatype')
+    }
+    outputs.upToDateWhen { !dependsOnTaskDidWork() }
+}
+
+afterEvaluate {
+    project.tasks.withType(Test) {
+        dependsOn updateSonatypeMirrorSetting
+    }
+}
+
+/**
+ * Reads an XML file and allows validation of the XML with the validIf closure.
+ */
+class ReadXmlTask extends DefaultTask {
+    @Input
+    String xmlFileName
+
+    Closure validIf // validIf should examine the XML and return a boolean
+
+    ReadXmlTask() {
+        description = "Reads the specified XML file"
+        group = "XML File"
+        outputs.upToDateWhen { false }
+    }
+
+    @TaskAction
+    void action() {
+        def invalidFile = true
+        def xmlFile = new File(xmlFileName)
+        if (xmlFile.exists()) {
+            if (validIf) {
+                try {
+                    def xml = new XmlSlurper().parse(xmlFile)
+                    def isValid = validIf(xml)
+                    logger.info('XML file ' + xmlFileName + ' is ' + (isValid ? 'valid' : 'invalid'))
+                    invalidFile = !isValid
+                } catch (e) {
+                }
+            } else {
+                invalidFile = false
+                logger.info('XML file ' + xmlFileName + ' exists')
+            }
+        } else {
+            logger.info('XML file ' + xmlFileName + ' does NOT exist!')
+        }
+
+        // We call setDidWork here to indicate whether this task's file is considered up-to-date.
+        // Setting it to true means we did work, which means the file is NOT up-to-date.
+        // Dependent tasks, like ArtifactoryResourceDownloader,can use dependsOnTaskDidWork() to
+        // determine the value of setDidwork...
+        setDidWork(invalidFile)
+    }
+}
+
+/**
+ * Updates or creates an XML file. Use the update closure to manipulate the XML doc as necessary.
+ */
+class UpdateXmlTask extends DefaultTask {
+    @Input
+    String xmlRoot
+
+    @OutputFile
+    File xmlFile
+
+    Closure update
+
+    UpdateXmlTask() {
+        description = "Updates the specified XML file"
+        group = "XML File"
+    }
+
+    @TaskAction
+    void action() {
+        def xml
+        if (xmlFile.exists()) {
+            try {
+                xml = new XmlParser().parse(xmlFile)
+            } catch (e) {
+            }
+        }
+        if (!xml) {
+            logger.info('Creating XML file ' + xmlFile)
+            xml = new XmlParser().parseText("<${xmlRoot}></${xmlRoot}>")
+        }
+        update(xml)
+        def writer = new FileWriter(xmlFile)
+        def printer = new XmlNodePrinter(new PrintWriter(writer))
+        printer.preserveWhitespace = true
+        printer.print(xml)
+    }
 }
